@@ -56,11 +56,40 @@ class Message
 #!csharp
 
 using System.Collections.Concurrent;
+using System.Threading;
 
 var queue1 = new BlockingCollection<Message>(2); //очередь первого потока
 var queue2 = new BlockingCollection<Message>(2); //очередь второго потока
 
 // Здесь писать решение
+
+int count = 0;
+
+Barrier barrier = new Barrier(2); 
+
+void communicate(BlockingCollection<Message> stq, BlockingCollection<Message> fnq, Barrier b)
+{
+    while (count < 200)
+    { 
+        if (stq.Count > 0)
+        {
+            Message received_m = stq.Take();
+            received_m.Handle();
+            Interlocked.Increment(ref count);
+            if (count < 200) fnq.Add(new Message());                
+        }
+        b.SignalAndWait();
+        
+    }
+}
+
+queue1.Add(new Message());
+
+Task t1 = Task.Run(() => communicate(queue1, queue2, barrier));
+Task t2 = Task.Run(() => communicate(queue2, queue1, barrier));
+
+t1.Wait();
+t2.Wait();
 
 #!csharp
 
