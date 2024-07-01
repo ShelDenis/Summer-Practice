@@ -37,10 +37,357 @@
 Для этого следует использовать условные события, которые позволят убедиться, что оба потока запустились и готовы читать и писать объекты и только потом запускать таймер.
 2. Для итогового вывода сравнивать усредненные значения.
 
-#!markdown
+#!csharp
 
-// здесь писать код
+#r "nuget:ScottPlot, 5.0.35"
+
+using System.Collections.Concurrent;
+using System.Threading;
+using System.Diagnostics;
+using Microsoft.DotNet.Interactive.Formatting;
+Formatter.Register(typeof(ScottPlot.Plot), (p, w) => 
+    w.Write(((ScottPlot.Plot)p).GetImageHtml(400, 300)), HtmlFormatter.MimeType);
+
+
+public class Message
+{
+    public int id; 
+
+    public Message(int iden)
+    {
+        id = iden;
+    }
+
+    public int Id{
+        get => this.id;
+        set => this.id = value;
+        }
+    
+}
+
+void bc_write(int n, Barrier bar, ref Stopwatch stw, bool do_bar, bool local_time)
+{
+    mre1.WaitOne();
+    if (local_time) stw.Start();
+    for (int i = 0; i < n; i++)
+    {
+        
+        Message m = new Message(i);
+        
+        if (i < n) bc.Add(m);
+        if (do_bar) 
+        {
+            bar.SignalAndWait();
+        }
+    }
+    if (local_time) stw.Stop();
+    
+}
+
+void bc_read(int n, Barrier bar, ref Stopwatch stw, bool do_bar, bool local_time)
+{
+    mre1.WaitOne();
+    if (local_time) stw.Start();
+    for (int i = 0; i < n; i++)
+    {
+        Message taken_mes;
+        if (bc.Count > 0)
+        {
+            taken_mes = bc.Take();
+        }
+        if (do_bar) bar.SignalAndWait();
+    }
+    if (local_time) stw.Stop();
+}
+
+
+void cq_write(int n, Barrier bar, ref Stopwatch stw, bool do_bar, bool local_time)
+{
+    mre1.WaitOne();
+    if (local_time) stw.Start();
+    for (int i = 0; i < n; i++)
+    {
+        Message m = new Message(i);
+        if (i < n) cq.Enqueue(m);
+        if (do_bar) bar.SignalAndWait();
+    }
+    if (local_time) stw.Stop();
+}
+
+void cq_read(int n, Barrier bar, ref Stopwatch stw, bool do_bar, bool local_time)
+{
+    mre1.WaitOne();
+    if (local_time) stw.Start();
+    for (int i = 0; i < n; i++)
+    {
+        Message taken_mes;
+        if (cq.Count > 0)
+        {
+            bool res = cq.TryDequeue(out taken_mes);              
+        }
+        if (do_bar) bar.SignalAndWait();
+    }
+    if (local_time) stw.Stop();
+}
+
+void q_write(int n)
+{
+    for (int i = 0; i < n; i++)
+    {
+        Message m = new Message(i);
+        q.Enqueue(m);
+    }
+}
+
+void q_read(int n)
+{
+    for (int i = 0; i < n; i++)
+    {
+        if (q.Count > 0)
+        {
+            Message res = q.Dequeue();        
+        }
+    }
+}
+
+
+Barrier b = new Barrier(2);
+private static ManualResetEvent mre1 = new ManualResetEvent(false);
+
+BlockingCollection<Message> bc = new BlockingCollection<Message>(1000000);
+ConcurrentQueue<Message> cq = new ConcurrentQueue<Message>();
+Queue<Message> q = new Queue<Message>();
+
+int num = 10;
+
+// отдельно для каждого потока
+
+Console.WriteLine("Для bc_write");
+
+double[] bc_write_times = new double[num];
+for (int k = 0; k < num; k++)
+{
+    Stopwatch stopWatch = new Stopwatch();
+
+    mre1.Set();
+    Task bc_write_t = Task.Run(() => bc_write(1000000, b, ref stopWatch, false, true));
+
+    bc_write_t.Wait();
+
+    mre1.Reset();
+
+    bc_write_times[k] = stopWatch.Elapsed.TotalMicroseconds;
+
+    Console.WriteLine(bc_write_times[k]);
+    if (k != num - 1) while (bc.TryTake(out _)){}
+}
+
+Console.WriteLine($"Среднее время для bc_write: {bc_write_times.Average()} мкc.");
+Console.WriteLine();
+Console.WriteLine("Для bc_read");
+
+double[] bc_read_times = new double[num];
+for (int k = 0; k < num; k++)
+{
+    Stopwatch stopWatch = new Stopwatch();
+
+    mre1.Set();
+    Task bc_read_t = Task.Run(() => bc_read(1000000, b, ref stopWatch, false, true));
+
+    bc_read_t.Wait();
+
+    mre1.Reset();
+
+    bc_read_times[k] = stopWatch.Elapsed.TotalMicroseconds;
+
+    Console.WriteLine(bc_read_times[k]);
+
+    for (int i = 0; i < 1000000; i++)
+        bc.Add(new Message(i));
+}
+
+Console.WriteLine($"Среднее время для bc_read: {bc_read_times.Average()} мкc.");
+Console.WriteLine();
+Console.WriteLine("Для cq_write");
+
+double[] cq_write_times = new double[num];
+for (int k = 0; k < num; k++)
+{
+    Stopwatch stopWatch = new Stopwatch();
+
+    mre1.Set();
+    Task cq_write_t = Task.Run(() => bc_read(1000000, b, ref stopWatch, false, true));
+
+    cq_write_t.Wait();
+
+    mre1.Reset();
+
+    cq_write_times[k] = stopWatch.Elapsed.TotalMicroseconds;
+
+    Console.WriteLine(cq_write_times[k]);
+
+    cq.Clear();
+}
+
+Console.WriteLine($"Среднее время для cq_write: {cq_write_times.Average()} мкc.");
+Console.WriteLine();
+Console.WriteLine("Для cq_read");
+
+double[] cq_read_times = new double[num];
+for (int k = 0; k < num; k++)
+{
+    Stopwatch stopWatch = new Stopwatch();
+
+    mre1.Set();
+    Task cq_read_t = Task.Run(() => cq_read(1000000, b, ref stopWatch, false, true));
+
+    cq_read_t.Wait();
+
+    mre1.Reset();
+
+    cq_read_times[k] = stopWatch.Elapsed.TotalMicroseconds;
+
+    Console.WriteLine(cq_write_times[k]);
+
+    for (int i = 0; i < 1000000; i++)
+        cq.Enqueue(new Message(i));
+}
+
+Console.WriteLine($"Среднее время для cq_read: {cq_read_times.Average()} мкc.");
+Console.WriteLine();
+Console.WriteLine("Для q_write");
+
+double[] q_write_times = new double[num];
+for (int k = 0; k < num; k++)
+{
+    Stopwatch stopWatch = new Stopwatch();
+    stopWatch.Start(); 
+    q_write(1000000);
+    stopWatch.Stop();
+
+    q_write_times[k] = stopWatch.Elapsed.TotalMicroseconds;
+    Console.WriteLine(q_write_times[k]);
+    if (k != num - 1) q.Clear();
+}
+
+Console.WriteLine($"Среднее время для q_write: {q_write_times.Average()} мкc.");
+Console.WriteLine();
+Console.WriteLine("Для q_read");
+
+double[] q_read_times = new double[num];
+for (int k = 0; k < num; k++)
+{
+    Stopwatch stopWatch = new Stopwatch();
+    stopWatch.Start(); 
+    q_read(1000000);
+    stopWatch.Stop();
+
+    q_read_times[k] = stopWatch.Elapsed.TotalMicroseconds;
+    Console.WriteLine(q_read_times[k]);
+    q_write(1000000);
+}
+
+Console.WriteLine($"Среднее время для q_read: {q_read_times.Average()} мкc.");
+Console.WriteLine();
+
+// для всех вместе
+
+double[] bc_times = new double[num];
+for (int k = 0; k < num; k++)
+{
+
+    Stopwatch stopWatch = new Stopwatch();
+
+    mre1.Reset();
+    Task bc_t1 = Task.Run(() => bc_write(1000000, b, ref stopWatch, true, false));
+    Task bc_t2 = Task.Run(() => bc_read(1000000, b, ref stopWatch, true, false));
+    
+    Thread.Sleep(500);
+
+    
+    stopWatch.Start();
+    mre1.Set();
+      
+    bc_t1.Wait();
+    bc_t2.Wait();
+    bc_times[k] = stopWatch.Elapsed.TotalMicroseconds;
+
+    Console.WriteLine(bc_times[k]);
+
+    mre1.Reset();
+} 
+
+Console.WriteLine($"Среднее время для BlockingCollection: {bc_times.Average()} мкc.");
+
+int[] numbers = Enumerable.Range(1, num).ToArray();
+
+ScottPlot.Plot plt1 = new();
+plt1.Add.Scatter(bc_times, numbers);
+plt1.SavePng("график для BlockingCollection.png", 600, 400);
+
+Console.WriteLine();
+
+private static ManualResetEvent mre2 = new ManualResetEvent(false);
+
+double[] cq_times = new double[num];
+for (int k = 0; k < num; k++)
+{
+
+    Stopwatch stopWatch = new Stopwatch();
+
+    mre1.Reset();
+
+    Task cq_t1 = Task.Run(() => cq_write(1000000, b, ref stopWatch, true, false));
+    Task cq_t2 = Task.Run(() => cq_read(1000000, b, ref stopWatch, true, false));
+
+    Thread.Sleep(500);
+    
+    stopWatch.Start(); 
+    mre1.Set();
+
+    cq_t1.Wait();
+    cq_t2.Wait();
+    stopWatch.Stop();
+    cq_times[k] = stopWatch.Elapsed.TotalMicroseconds;
+    Console.WriteLine(cq_times[k]);
+    mre1.Reset();
+}
+
+Console.WriteLine($"Среднее время для ConcurrentQueue: {cq_times.Average()} мкc.");
+
+ScottPlot.Plot plt2 = new();
+plt2.Add.Scatter(cq_times, numbers);
+plt2.SavePng("график для ConcurrentQueue.png", 600, 400);
+
+Console.WriteLine();
+
+double[] q_times = new double[num];
+for (int k = 0; k < num; k++)
+{
+    Stopwatch stopWatch = new Stopwatch();
+    stopWatch.Start(); 
+    q_write(1000000);
+    q_read(1000000);
+    stopWatch.Stop();
+
+    q_times[k] = stopWatch.Elapsed.TotalMicroseconds;
+    Console.WriteLine(q_times[k]);
+}
+
+Console.WriteLine($"Среднее время для Queue: {q_times.Average()} мкc.");
+
+ScottPlot.Plot plt3 = new();
+plt3.Add.Scatter(q_times, numbers);
+plt3.SavePng("график для Queue.png", 600, 400);
+
+double percent = Math.Abs(cq_times.Average() - q_times.Average()) / q_times.Average() * 100;
+Console.WriteLine($"ConcurrentQueue медленне Queue на {Math.Round(percent, 1)} %")
 
 #!markdown
 
 ## Вывод
+
+#!markdown
+
+Самая быстрая потокобезопасная коллекция - ConcurrentQueue,
+Хотя она на 567.8% медленнее обычной очереди (Queue)
