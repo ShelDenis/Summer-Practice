@@ -1,0 +1,255 @@
+#!meta
+
+{"kernelInfo":{"defaultKernelName":"csharp","items":[{"aliases":[],"languageName":"csharp","name":"csharp"}]}}
+
+#!markdown
+
+# Практическая работа №9. Реализация длительных операций.
+
+**Цель:** Предоставить возможность выполннеия команд, для полного завершения которых требуется более одного вызова Execute.
+
+**Результаты:** После выполнения работы Вы сможете:
+1. Выполнять длительные опреации в отдельном потоке без монопольного использования потока в течение длительного времени.
+3. Прерывать выполнение таких команд. 
+
+
+## Задание.
+Если для полного выполнения командв потребуется более одного вызова Execute, необходимо такую команду добавить в планировщик.
+
+Для иллюстрации выполнненой работы определить команду
+
+#!csharp
+
+public interface ICommand
+{
+    void Execute();
+}
+
+
+public class MyCommand(int id) : ICommand
+{
+    int counter = 0;
+
+    public void Execute()
+    {
+        Console.WriteLine($"Поток {id} вызов {++counter}");
+    }
+}
+
+public interface IScheduler
+{
+    bool HasCommand();
+    ICommand Select();
+    void Add(ICommand cmd);
+}
+
+#!markdown
+
+Необходимо проиллюстрировать выполнение 5 экземпляров TestCommand 3 раза, затем остановить поток с помощью HardStop.
+
+#!csharp
+
+using System.Threading;
+using System.Collections.Concurrent;
+using System.Diagnostics;
+
+class MyScheduler: IScheduler
+{
+    ConcurrentQueue<ICommand> queue = new ConcurrentQueue<ICommand>();
+
+    public bool HasCommand()
+    {
+        return (queue.Count() > 0);
+    }
+
+    public ICommand Select()
+    {
+        ICommand c;
+        bool ok = queue.TryDequeue(out c);
+        return c;
+    }
+
+    public void Add(ICommand cmd) 
+    {
+        queue.Enqueue(cmd);
+    }
+}
+
+static bool exit = false;
+static bool soft_exit = false;
+static List<ManualResetEvent> mlist = new List<ManualResetEvent>();
+static object locker = new();
+
+class ServerThread
+{
+    List<Task> tlist = new List<Task>();
+    ManualResetEvent local_mre;
+    MyScheduler mysh = new MyScheduler();
+
+    public void ExceptionHandler(ICommand com, Exception exc)
+    {
+        Console.WriteLine("Ошибка!");
+    }
+
+
+    public Task new_thread(ConcurrentQueue<ICommand> queue)
+    {
+        foreach(ICommand ic in queue)
+            mysh.Add(ic);
+
+        local_mre = new ManualResetEvent(false);
+        mlist.Add(local_mre);
+        local_mre.Set();
+        
+        Task t = Task.Run(() => 
+        {
+            int count = 0;
+            bool soft_stop = false;
+            while (true)
+            {
+                if (mysh.HasCommand())
+                {
+                    ICommand c;
+                    c = mysh.Select();
+                    try
+                    {
+                        local_mre.WaitOne();
+                        lock (locker)
+                        {
+                            c.Execute();
+                            if (exit)
+                            {
+                                exit = false;
+                                break;
+                            }
+                            
+                            if (soft_exit || soft_stop)
+                            {
+                                soft_stop = true;
+                                if (queue.Count == 0)
+                                {
+                                    Console.WriteLine("Плавный выход");
+                                    break;
+                                }
+                                soft_exit = false;
+                            }
+                            count++;
+                            if (count == 3)
+                                mysh.Add(new HardStop());
+                            else
+                                mysh.Add(c);
+                        }
+                    }
+                    catch (Exception e)
+                    {
+                        ExceptionHandler(c, e);
+                    }
+                    
+                    
+                }
+            }
+        });
+        tlist.Add(t);
+        return t;
+    }
+
+    public void green_light()
+    {
+        Task[] tarr = tlist.ToArray();
+        Task.WaitAll(tarr);
+    }
+}
+
+class HardStop: ICommand
+{
+    public void Execute()
+    {
+        Console.WriteLine("Резкий выход");
+        exit = true;
+    }
+}
+
+
+class SoftStop: ICommand
+{
+    public void Execute()
+    {
+        soft_exit = true;
+    }
+}
+
+ICommand[] lst1 = 
+{
+    new MyCommand(1),
+};
+
+ICommand[] lst2 = 
+{
+    new MyCommand(2),
+};
+
+ICommand[] lst3 = 
+{
+    new MyCommand(3),
+};
+
+ICommand[] lst4 = 
+{
+    new MyCommand(4),
+};
+
+ICommand[] lst5 = 
+{
+    new MyCommand(5),
+};
+
+// Тест
+
+ServerThread s = new ServerThread();
+
+ConcurrentQueue<ICommand> user1 = new ConcurrentQueue<ICommand>();
+foreach(ICommand ic in lst1) user1.Enqueue(ic);
+ConcurrentQueue<ICommand> user2 = new ConcurrentQueue<ICommand>();
+foreach(ICommand ic in lst2) user2.Enqueue(ic);
+ConcurrentQueue<ICommand> user3 = new ConcurrentQueue<ICommand>();
+foreach(ICommand ic in lst3) user3.Enqueue(ic);
+ConcurrentQueue<ICommand> user4 = new ConcurrentQueue<ICommand>();
+foreach(ICommand ic in lst4) user4.Enqueue(ic);
+ConcurrentQueue<ICommand> user5 = new ConcurrentQueue<ICommand>();
+foreach(ICommand ic in lst5) user5.Enqueue(ic);
+
+Task task1 = s.new_thread(user1);
+Task task2 = s.new_thread(user2);
+Task task3 = s.new_thread(user3);
+Task task4 = s.new_thread(user4);
+Task task5 = s.new_thread(user5);
+
+Task[] tasks = {task1, task2, task3, task4, task5};
+double time;
+int active = 0;
+Stopwatch stw = new Stopwatch();
+bool go = true;
+while (go)
+{
+    stw.Start();
+    stw.Stop();
+    time += stw.Elapsed.TotalMilliseconds;
+    if (time > 500)
+    {
+        mlist[active++].Reset();            
+        if (active == mlist.Count)
+            active = 0;
+        mlist[active].Set();
+    }
+
+    int cnt = 0;
+    foreach(Task ta in tasks)
+    {
+        if (ta.IsCompleted) 
+            cnt++;
+    }
+
+    if (cnt == tasks.Count())
+        break;
+    
+}
