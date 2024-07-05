@@ -1,0 +1,326 @@
+#!meta
+
+{"kernelInfo":{"defaultKernelName":"csharp","items":[{"aliases":[],"languageName":"csharp","name":"csharp"}]}}
+
+#!markdown
+
+# Практическая работа №10. Доставка сообщений до Команды.
+
+**Цель:** Предоставить возможность обмена данными для длительных операций.
+
+**Результаты:** После выполнения работы Вы сможете:
+1. Отправлять сообщения длительной операции.
+
+## Задание.
+Поскольку длительная операция выполняется в течение некоторого момента времени, то может возникнуть необходимость
+в предоставлении дополнительной информации, влияющей на ход выполнения. Поскольку Команды и источник данных часто находятся в разных потоках,
+то сделать это надо потоко-безопасным образом. Самый простой способ - используя идиому Производитель-Поребитель, в нашем случае - очередь.
+
+Набор данных, предназначенных для Команды будем называть сообщением. Можно использовать любую подходящую конструкцию языка программирования для 
+представления сообщения. Необходимо учесть, что скорость доставки сообщений может быть выше, чем скорость обработки, а значит очередь сообщений должна быть
+у каждой Длительной операции. При этом потоко-безопасные очереди требуют системных ресурсов, а значит, чтобы не получить ограничение на максимальное количество
+одновремнно работающих длительных Команд, нельзя использовать потоко-безопасные очереди. 
+
+Возможный вариант реализации - оставить одну потоко-безопасную очередь для потока, а для Команд использовать обычные очереди. Осталось только решить, как сообщение
+излеченное из очереди потока попадет в очередь Команды. Один из возможных вариантов:
+1. Каждая команда имеет уникальный идентификатор.
+2. Сообщение содержит уникальный идентификатор Команлды, которому оно адресовано.
+3. Для потока создаем специальную Длительную Команду, которая назвается Роутером. Он хранит коллекцию пар (id Команды, ссылка на очередь Команды). При вызове метода Execute этой 
+Роутера, если очередь потока не пуста, происходит чтение очередного сообщения и по id Команды определяется очередь, куда это сообщение записывается.
+Если id Команды не определен, на консоль выводится сообщение о невозможности доставить сообщение неизвестному адресату.
+При старте новой Команды, ее очередь необходимо добавить в коллекцию Роутера. При остановке Команды - очередь удаляется из коллекции Роутера.
+
+Продемонстрировать работу Роутера на двух Длительных Командах и на отправке сообщения несуществующей Команде.
+
+**Материалы для самостоятельного изучения**.
+1. [Паттерн Сообщение](https://www.enterpriseintegrationpatterns.com/patterns/messaging/Message.html)
+2. [Паттерн Роутер - весь раздел про Роутеры](https://www.enterpriseintegrationpatterns.com/patterns/messaging/MessageRoutingIntro.html)
+3. [Обмен сообщеними](https://www.enterpriseintegrationpatterns.com/patterns/messaging/MessageConstructionIntro.html)
+
+#!csharp
+
+using System.Threading;
+using System.Collections.Concurrent;
+using System.Diagnostics;
+
+static bool exit = false;
+static bool soft_exit = false;
+static List<ManualResetEvent> mlist = new List<ManualResetEvent>();
+static object locker = new();
+static int N = 2;
+static Router router = new Router();
+
+
+public class Message
+{
+    ICommand cmd;
+    int tsk_id;
+
+    public Message(ICommand cmd, int tsk_id)
+    {
+        this.cmd = cmd;
+        this.tsk_id = tsk_id;
+    }
+
+    public ICommand Cmd{get => cmd; set => cmd = value;}
+
+    public int TaskId {get => tsk_id; set => tsk_id = value;}
+}
+
+
+public interface ICommand
+{
+    void Execute();
+}
+
+
+public class TestCommand(int id) : ICommand
+{
+    int counter = 0;
+
+    public void Execute()
+    {
+        Console.WriteLine($"Поток {id} вызов {++counter}");
+    }
+}
+
+public interface IScheduler
+{
+    bool HasCommand();
+    ICommand Select();
+    void Add(ICommand cmd);
+}
+
+class MyScheduler: IScheduler
+{
+    ConcurrentQueue<ICommand> queue = new ConcurrentQueue<ICommand>();
+
+    public bool HasCommand()
+    {
+        return (queue.Count() > 0);
+    }
+
+    public ICommand Select()
+    {
+        ICommand c;
+        bool ok = queue.TryDequeue(out c);
+        return c;
+    }
+
+    public void Add(ICommand cmd) 
+    {
+        queue.Enqueue(cmd);
+    }
+}
+
+class Router
+{
+    Queue<Message> global_queue = new Queue<Message>();
+
+    public bool check(int cur_id)
+    {
+        if (global_queue.Count == 0)
+            return false; 
+        Message msg = global_queue.Peek();
+        return (cur_id == msg.TaskId);
+    }
+
+    public void put(ICommand command, int id)
+    {
+        try
+        {
+            if (id > N)
+                throw new Exception($"Потока с id {id} не существует!");
+            Message msg = new Message(command, id);
+            global_queue.Enqueue(msg);
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine(e.Message);
+        }
+    }
+
+    public ICommand take(int id)
+    {
+        if (check(id))
+        {
+            Message msg = global_queue.Dequeue();
+            return msg.Cmd;
+        }
+        return null;
+    }
+}
+
+class ServerThread
+{
+    ManualResetEvent local_mre;
+    MyScheduler mysh = new MyScheduler();
+
+    public void ExceptionHandler(ICommand com, Exception exc)
+    {
+        Console.WriteLine("Ошибка!");
+    }
+
+    public void action(int task_id, ConcurrentQueue<ICommand> q)
+    {
+        int count = 0;
+            bool soft_stop = false;
+            while (true)
+            {
+                if (mysh.HasCommand())
+                {
+                    ICommand c;
+                    c = mysh.Select();
+                    try
+                    {
+                        local_mre.WaitOne();
+                        lock (locker)
+                        {
+                            c.Execute();
+                            if (exit)
+                            {
+                                exit = false;
+                                break;
+                            }
+                            
+                            if (soft_exit || soft_stop)
+                            {
+                                soft_stop = true;
+                                if (q.Count == 0)
+                                {
+                                    Console.WriteLine("Плавный выход");
+                                    break;
+                                }
+                                soft_exit = false;
+                                }
+                            count++;
+                            ICommand com = router.take(task_id);
+                            if (com != null)
+                            {
+                                mysh.Add(com);
+                            }
+                                
+                            if (count >= 10)
+                                mysh.Add(new HardStop());
+                            else
+                                mysh.Add(c);
+                        }
+                    }
+                    catch (Exception e)
+                    {
+                        ExceptionHandler(c, e);
+                    }
+                    
+                    
+                }
+        }
+    }
+
+    public Task new_thread(int tid, ConcurrentQueue<ICommand> queue)
+    {
+        foreach(ICommand ic in queue)
+            mysh.Add(ic);
+
+        local_mre = new ManualResetEvent(false);
+        mlist.Add(local_mre);
+        local_mre.Set();
+        
+        Task t = Task.Run(() => action(tid, queue));
+        return t;
+    }
+}
+
+class HardStop(): ICommand
+{
+    public void Execute()
+    {
+        Console.WriteLine("Резкий выход");
+        exit = true;
+    }
+}
+
+
+class SoftStop(): ICommand
+{
+    public void Execute()
+    {
+        soft_exit = true;
+    }
+}
+
+class RC(int t_id): ICommand
+{
+    public void Execute()
+    {
+        Console.WriteLine($"Роутер сработал в потоке {t_id}!");
+    }
+}
+
+ICommand[] lst1 = 
+{
+    new TestCommand(1),
+};
+
+ICommand[] lst2 = 
+{
+    new TestCommand(2),
+};
+
+// Тест
+
+ServerThread s = new ServerThread();
+
+ConcurrentQueue<ICommand> user1 = new ConcurrentQueue<ICommand>();
+foreach(ICommand ic in lst1) user1.Enqueue(ic);
+ConcurrentQueue<ICommand> user2 = new ConcurrentQueue<ICommand>();
+foreach(ICommand ic in lst2) user2.Enqueue(ic);
+
+Task task1 = s.new_thread(1, user1);
+Task task2 = s.new_thread(2, user2);
+
+Task[] tasks = {task1, task2};
+
+double time;
+int active = 0;
+Stopwatch stw = new Stopwatch();
+bool go = true;
+int time_count = 0;
+bool first_time_to_show = true;
+while (go)
+{
+    stw.Start();
+    stw.Stop();
+    time += stw.Elapsed.TotalMilliseconds;
+    if (time > 500)
+    {
+        mlist[active++].Reset();        
+        if (active == mlist.Count)
+            active = 0;
+        time_count++;
+        if (time_count % 7 == 0)
+        {
+            router.put(new RC(active + 1), active + 1);
+
+            // демонстрация отлова ошибки запроса у роутера несуществующего потока
+            if (first_time_to_show)
+            {
+                router.put(new RC(active + 1), 3);
+                first_time_to_show = false;
+            }
+        }
+            
+        mlist[active].Set();
+        time = 0;
+    }
+
+    int cnt = 0;
+    foreach(Task ta in tasks)
+    {
+        if (ta.IsCompleted) 
+            cnt++;
+    }
+
+    if (cnt == tasks.Count())
+        break;
+    
+}
